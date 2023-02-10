@@ -19,6 +19,7 @@ type CloudStorage interface {
 	DownloadFile(ct context.Context, file io.Writer, cfr CloudFileRequest) (int64, error)
 	ListObjects(ctx context.Context, cfr CloudFileRequest) ([]string, error)
 	DeleteObjects(ctx context.Context, cfr CloudFileRequest) error
+	Close() error
 }
 
 type CloudStorageClientConfig struct {
@@ -51,7 +52,7 @@ func NewCloudStorageClient(cfg CloudStorageClientConfig, logger logger.AppLogger
 	return loaderClient, nil
 }
 
-func (lc *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, cloudFileRequest CloudFileRequest) (int64, error) {
+func (cs *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, cloudFileRequest CloudFileRequest) (int64, error) {
 	if cloudFileRequest.file == "" {
 		return 0, ErrFileNameMissing
 	}
@@ -64,33 +65,33 @@ func (lc *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, clo
 	defer cancel()
 
 	// Upload an object with storage.Writer.
-	obj := lc.client.Bucket(cloudFileRequest.bucket).Object(fPath)
+	obj := cs.client.Bucket(cloudFileRequest.bucket).Object(fPath)
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		lc.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
+		cs.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
 	} else {
 		objcr := attrs.Created.Unix()
 		objmod := attrs.Updated.Unix()
-		lc.logger.Info("object created time", zap.Any("created", objcr), zap.Any("updated", objmod), zap.String("filepath", fPath))
+		cs.logger.Info("object created time", zap.Any("created", objcr), zap.Any("updated", objmod), zap.String("filepath", fPath))
 	}
 
 	wc := obj.NewWriter(ctx)
 	defer func() {
 		if err := wc.Close(); err != nil {
-			lc.logger.Error(ERROR_CLOSING_FILE, zap.Error(err), zap.String("filepath", fPath))
+			cs.logger.Error(ERROR_CLOSING_FILE, zap.Error(err), zap.String("filepath", fPath))
 		}
 	}()
 
 	nBytes, err := io.Copy(wc, file)
 	if err != nil {
-		lc.logger.Error(ERROR_UPLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
+		cs.logger.Error(ERROR_UPLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
 		return 0, errors.WrapError(err, ERROR_UPLOADING_FILE, fPath)
 	}
 
 	return nBytes, nil
 }
 
-func (lc *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, cloudFileRequest CloudFileRequest) (int64, error) {
+func (cs *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, cloudFileRequest CloudFileRequest) (int64, error) {
 	if cloudFileRequest.file == "" {
 		return 0, ErrFileNameMissing
 	}
@@ -103,38 +104,38 @@ func (lc *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, c
 	defer cancel()
 
 	// download an object with storage.Reader.
-	obj := lc.client.Bucket(cloudFileRequest.bucket).Object(fPath)
+	obj := cs.client.Bucket(cloudFileRequest.bucket).Object(fPath)
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		lc.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
+		cs.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
 		return 0, errors.WrapError(err, ERROR_FILE_INACCESSIBLE, fPath)
 	}
 	objcr := attrs.Created.Unix()
 	objmod := attrs.Updated.Unix()
-	lc.logger.Info("object created time", zap.Any("created", objcr), zap.Any("updated", objmod), zap.String("filepath", fPath))
+	cs.logger.Info("object created time", zap.Any("created", objcr), zap.Any("updated", objmod), zap.String("filepath", fPath))
 
 	rc, err := obj.NewReader(ctx)
 	if err != nil {
-		lc.logger.Error(ERROR_DOWNLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
+		cs.logger.Error(ERROR_DOWNLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
 		return 0, errors.WrapError(err, ERROR_DOWNLOADING_FILE, fPath)
 	}
 	defer func() {
 		if err := rc.Close(); err != nil {
-			lc.logger.Error(ERROR_CLOSING_FILE, zap.Error(err), zap.String("filepath", fPath))
+			cs.logger.Error(ERROR_CLOSING_FILE, zap.Error(err), zap.String("filepath", fPath))
 		}
 	}()
 
 	nBytes, err := io.Copy(file, rc)
 	if err != nil {
-		lc.logger.Error(ERROR_DOWNLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
+		cs.logger.Error(ERROR_DOWNLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
 		return 0, errors.WrapError(err, ERROR_DOWNLOADING_FILE, fPath)
 	}
 
 	return nBytes, nil
 }
 
-func (lc *cloudStorageClient) ListObjects(ctx context.Context, cloudFileRequest CloudFileRequest) ([]string, error) {
-	bucket := lc.client.Bucket(cloudFileRequest.bucket)
+func (cs *cloudStorageClient) ListObjects(ctx context.Context, cloudFileRequest CloudFileRequest) ([]string, error) {
+	bucket := cs.client.Bucket(cloudFileRequest.bucket)
 	it := bucket.Objects(ctx, nil)
 	names := []string{}
 	for {
@@ -143,7 +144,7 @@ func (lc *cloudStorageClient) ListObjects(ctx context.Context, cloudFileRequest 
 			if err == iterator.Done {
 				break
 			} else {
-				lc.logger.Error(ERROR_LISTING_OBJECTS, zap.Error(err))
+				cs.logger.Error(ERROR_LISTING_OBJECTS, zap.Error(err))
 				return names, errors.WrapError(err, ERROR_LISTING_OBJECTS)
 			}
 		}
@@ -152,8 +153,8 @@ func (lc *cloudStorageClient) ListObjects(ctx context.Context, cloudFileRequest 
 	return names, nil
 }
 
-func (lc *cloudStorageClient) DeleteObjects(ctx context.Context, cloudFileRequest CloudFileRequest) error {
-	bucket := lc.client.Bucket(cloudFileRequest.bucket)
+func (cs *cloudStorageClient) DeleteObjects(ctx context.Context, cloudFileRequest CloudFileRequest) error {
+	bucket := cs.client.Bucket(cloudFileRequest.bucket)
 	it := bucket.Objects(ctx, nil)
 	for {
 		objAttrs, err := it.Next()
@@ -161,15 +162,24 @@ func (lc *cloudStorageClient) DeleteObjects(ctx context.Context, cloudFileReques
 			if err == iterator.Done {
 				break
 			} else {
-				lc.logger.Error(ERROR_LISTING_OBJECTS, zap.Error(err))
+				cs.logger.Error(ERROR_LISTING_OBJECTS, zap.Error(err))
 				return errors.WrapError(err, ERROR_LISTING_OBJECTS)
 			}
 		}
-		lc.logger.Info("object attributes", zap.Any("objAttrs", objAttrs))
+		cs.logger.Info("object attributes", zap.Any("objAttrs", objAttrs))
 		if err := bucket.Object(objAttrs.Name).Delete(ctx); err != nil {
-			lc.logger.Error(ERROR_DELETING_OBJECTS, zap.Error(err))
+			cs.logger.Error(ERROR_DELETING_OBJECTS, zap.Error(err))
 			return errors.WrapError(err, ERROR_DELETING_OBJECTS)
 		}
+	}
+	return nil
+}
+
+func (cs *cloudStorageClient) Close() error {
+	err := cs.client.Close()
+	if err != nil {
+		cs.logger.Error("error closing storage client", zap.Error(err))
+		return errors.WrapError(err, "error closing storage client")
 	}
 	return nil
 }

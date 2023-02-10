@@ -1,1 +1,6 @@
 creds
+env
+
+data
+go.sum
+vendor

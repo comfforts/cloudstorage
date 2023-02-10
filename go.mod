@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/storage v1.28.1
 	github.com/comfforts/errors v0.1.1
 	github.com/comfforts/logger v0.1.1
+	github.com/stretchr/testify v1.8.1
 	go.uber.org/zap v1.24.0
 	google.golang.org/api v0.107.0
 )
@@ -23,7 +24,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.2.1 // indirect
 	github.com/googleapis/gax-go/v2 v2.7.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/stretchr/testify v1.8.1 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
