@@ -12,8 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const TEST_DIR = "test-data"
-
 type testConfig struct {
 	dir       string
 	bucket    string
@@ -21,10 +19,14 @@ type testConfig struct {
 }
 
 func getTestConfig() testConfig {
+	dataDir := os.Getenv("DATA_DIR")
+	credsPath := os.Getenv("CREDS_PATH")
+	bktName := os.Getenv("BUCKET_NAME")
+
 	return testConfig{
-		dir:       fmt.Sprintf("%s/", TEST_DIR),
-		bucket:    "mustum-fustum",            // add a valid bucket name
-		credsPath: "creds/mustum-fustum.json", // add valid creds and path
+		dir:       dataDir,
+		bucket:    bktName,
+		credsPath: credsPath,
 	}
 }
 
@@ -56,20 +58,23 @@ func setupCloudTest(t *testing.T, testCfg testConfig) (
 ) {
 	t.Helper()
 
-	err := createDirectory(testCfg.dir)
+	err := createDirectory(fmt.Sprintf("%s/", testCfg.dir))
 	require.NoError(t, err)
 
-	appLogger := logger.NewTestAppLogger(TEST_DIR)
+	logger := logger.NewTestAppLogger(testCfg.dir)
 
 	cscCfg := CloudStorageClientConfig{
 		CredsPath: testCfg.credsPath,
 	}
-	fsc, err := NewCloudStorageClient(cscCfg, appLogger)
+	csc, err := NewCloudStorageClient(cscCfg, logger)
 	require.NoError(t, err)
 
-	return fsc, func() {
+	return csc, func() {
+		err := csc.Close()
+		require.NoError(t, err)
+
 		t.Logf(" test ended, will remove %s folder", testCfg.dir)
-		err := os.RemoveAll(TEST_DIR)
+		err = os.RemoveAll(testCfg.dir)
 		require.NoError(t, err)
 	}
 }
