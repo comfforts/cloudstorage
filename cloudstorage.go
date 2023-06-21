@@ -2,6 +2,7 @@ package cloudstorage
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,10 +16,17 @@ import (
 )
 
 type CloudStorage interface {
-	UploadFile(ct context.Context, file io.Reader, cfr CloudFileRequest) (int64, error)
-	DownloadFile(ct context.Context, file io.Writer, cfr CloudFileRequest) (int64, error)
-	ListObjects(ctx context.Context, cfr CloudFileRequest) ([]string, error)
-	DeleteObjects(ctx context.Context, cfr CloudFileRequest) error
+	// UploadFile uploads file to given cloud bucket & filepath, creates a new one or replaces existing
+	UploadFile(context.Context, io.Reader, CloudFileRequest) (int64, error)
+	// DownloadFile copies content of file at given cloud bucket & filepath to given file
+	DownloadFile(context.Context, io.Writer, CloudFileRequest) (int64, error)
+	// ListObjects lists objects at given cloud bucket
+	ListObjects(context.Context, CloudFileRequest) ([]string, error)
+	// DeleteObject delete file at given cloud bucket & filepath
+	DeleteObject(context.Context, CloudFileRequest) error
+	// DeleteObjects delete files at given cloud bucket
+	DeleteObjects(context.Context, CloudFileRequest) error
+	// Close closes storage client connections
 	Close() error
 }
 
@@ -32,6 +40,7 @@ type cloudStorageClient struct {
 	logger logger.AppLogger
 }
 
+// NewCloudStorageClient takes client config & logger, returns cloud storage client
 func NewCloudStorageClient(cfg CloudStorageClientConfig, logger logger.AppLogger) (*cloudStorageClient, error) {
 	if logger == nil {
 		return nil, errors.NewAppError(errors.ERROR_MISSING_REQUIRED)
@@ -52,27 +61,25 @@ func NewCloudStorageClient(cfg CloudStorageClientConfig, logger logger.AppLogger
 	return loaderClient, nil
 }
 
-func (cs *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, cloudFileRequest CloudFileRequest) (int64, error) {
-	if cloudFileRequest.file == "" {
+func (cs *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, cfr CloudFileRequest) (int64, error) {
+	if cfr.file == "" {
 		return 0, ErrFileNameMissing
 	}
-	fPath := cloudFileRequest.file
-	if cloudFileRequest.path != "" {
-		fPath = filepath.Join(cloudFileRequest.path, cloudFileRequest.file)
+	fPath := cfr.file
+	if cfr.path != "" {
+		fPath = filepath.Join(cfr.path, cfr.file)
 	}
 
 	ctx, cancel := context.WithTimeout(ct, time.Second*50)
 	defer cancel()
 
 	// Upload an object with storage.Writer.
-	obj := cs.client.Bucket(cloudFileRequest.bucket).Object(fPath)
+	obj := cs.client.Bucket(cfr.bucket).Object(fPath)
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		cs.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
+		cs.logger.Debug("cloud file doesn't exist, will create new", zap.String("filepath", fPath))
 	} else {
-		objcr := attrs.Created.Unix()
-		objmod := attrs.Updated.Unix()
-		cs.logger.Info("object created time", zap.Any("created", objcr), zap.Any("updated", objmod), zap.String("filepath", fPath))
+		cs.logger.Debug("cloud file exists", zap.Int64("created", attrs.Created.Unix()), zap.Int64("updated", attrs.Updated.Unix()), zap.String("filepath", fPath))
 	}
 
 	wc := obj.NewWriter(ctx)
@@ -87,32 +94,30 @@ func (cs *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, clo
 		cs.logger.Error(ERROR_UPLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
 		return 0, errors.WrapError(err, ERROR_UPLOADING_FILE, fPath)
 	}
-
+	cs.logger.Debug("cloud file created/updated", zap.String("filepath", fPath))
 	return nBytes, nil
 }
 
-func (cs *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, cloudFileRequest CloudFileRequest) (int64, error) {
-	if cloudFileRequest.file == "" {
+func (cs *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, cfr CloudFileRequest) (int64, error) {
+	if cfr.file == "" {
 		return 0, ErrFileNameMissing
 	}
-	fPath := cloudFileRequest.file
-	if cloudFileRequest.path != "" {
-		fPath = filepath.Join(cloudFileRequest.path, cloudFileRequest.file)
+	fPath := cfr.file
+	if cfr.path != "" {
+		fPath = filepath.Join(cfr.path, cfr.file)
 	}
 
 	ctx, cancel := context.WithTimeout(ct, time.Second*50)
 	defer cancel()
 
 	// download an object with storage.Reader.
-	obj := cs.client.Bucket(cloudFileRequest.bucket).Object(fPath)
+	obj := cs.client.Bucket(cfr.bucket).Object(fPath)
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
 		cs.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
 		return 0, errors.WrapError(err, ERROR_FILE_INACCESSIBLE, fPath)
 	}
-	objcr := attrs.Created.Unix()
-	objmod := attrs.Updated.Unix()
-	cs.logger.Info("object created time", zap.Any("created", objcr), zap.Any("updated", objmod), zap.String("filepath", fPath))
+	cs.logger.Debug("cloud file downloaded", zap.String("filepath", fPath), zap.Int64("created", attrs.Created.Unix()), zap.Int64("updated", attrs.Updated.Unix()))
 
 	rc, err := obj.NewReader(ctx)
 	if err != nil {
@@ -134,8 +139,12 @@ func (cs *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, c
 	return nBytes, nil
 }
 
-func (cs *cloudStorageClient) ListObjects(ctx context.Context, cloudFileRequest CloudFileRequest) ([]string, error) {
-	bucket := cs.client.Bucket(cloudFileRequest.bucket)
+func (cs *cloudStorageClient) ListObjects(ctx context.Context, req CloudFileRequest) ([]string, error) {
+	if req.bucket == "" {
+		return nil, ErrBucketNameMissing
+	}
+
+	bucket := cs.client.Bucket(req.bucket)
 	it := bucket.Objects(ctx, nil)
 	names := []string{}
 	for {
@@ -153,8 +162,32 @@ func (cs *cloudStorageClient) ListObjects(ctx context.Context, cloudFileRequest 
 	return names, nil
 }
 
-func (cs *cloudStorageClient) DeleteObjects(ctx context.Context, cloudFileRequest CloudFileRequest) error {
-	bucket := cs.client.Bucket(cloudFileRequest.bucket)
+func (cs *cloudStorageClient) DeleteObject(ctx context.Context, req CloudFileRequest) error {
+	if req.bucket == "" {
+		return ErrBucketNameMissing
+	}
+	if req.path == "" {
+		return ErrFilePathMissing
+	}
+	if req.file == "" {
+		return ErrFileNameMissing
+	}
+
+	bucket := cs.client.Bucket(req.bucket)
+	objName := fmt.Sprintf("%s/%s", req.path, req.file)
+
+	if err := bucket.Object(objName).Delete(ctx); err != nil {
+		cs.logger.Error(ERROR_DELETING_OBJECT, zap.Error(err))
+		return errors.WrapError(err, ERROR_DELETING_OBJECT)
+	}
+	return nil
+}
+
+func (cs *cloudStorageClient) DeleteObjects(ctx context.Context, req CloudFileRequest) error {
+	if req.bucket == "" {
+		return ErrBucketNameMissing
+	}
+	bucket := cs.client.Bucket(req.bucket)
 	it := bucket.Objects(ctx, nil)
 	for {
 		objAttrs, err := it.Next()
@@ -191,6 +224,7 @@ type CloudFileRequest struct {
 	modTime int64
 }
 
+// NewCloudFileRequest takes bucket name, file name & filepath, return cloud storage request
 func NewCloudFileRequest(bucketName, fileName, path string, modTime int64) (CloudFileRequest, error) {
 	if bucketName == "" {
 		return CloudFileRequest{}, ErrBucketNameMissing

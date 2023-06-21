@@ -38,10 +38,9 @@ func TestCloudFileStorage(t *testing.T) {
 		client CloudStorage,
 		testCfg testConfig,
 	){
-		"cloud storage file upload succeeds":   testUpload,
-		"cloud storage file download succeeds": testDownload,
-		"list objects succeeds":                testListObjects,
-		"delete cloud bucket objects succeeds": testDeleteObjects,
+		"list objects succeeds":                   testListObjects,
+		"file upload & delete succeeds":           testUploadDelete,
+		"file upload, download & delete succeeds": testUploadDownloadDelete,
 	} {
 		testCfg := getTestConfig()
 		t.Run(scenario, func(t *testing.T) {
@@ -79,8 +78,8 @@ func setupCloudTest(t *testing.T, testCfg testConfig) (
 	}
 }
 
-func testUpload(t *testing.T, client CloudStorage, testCfg testConfig) {
-	name := "test"
+func testUploadDelete(t *testing.T, client CloudStorage, testCfg testConfig) {
+	name := "testUpDe"
 	filePath, err := createJSONFile(testCfg.dir, name)
 	require.NoError(t, err)
 
@@ -91,23 +90,25 @@ func testUpload(t *testing.T, client CloudStorage, testCfg testConfig) {
 		require.NoError(t, err)
 	}()
 
-	destName := fmt.Sprintf("%s.json", name)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cfr, err := NewCloudFileRequest(testCfg.bucket, destName, testCfg.dir, 0)
+	cfr, err := NewCloudFileRequest(testCfg.bucket, filepath.Base(filePath), testCfg.dir, 0)
 	require.NoError(t, err)
 
 	n, err := client.UploadFile(ctx, file, cfr)
 	require.NoError(t, err)
-	t.Logf(" testUpload: %d bytes written", n)
+	t.Logf(" testUploadDelete: %d bytes written", n)
 	require.Equal(t, true, n > 0)
+
+	err = client.DeleteObject(ctx, cfr)
+	require.NoError(t, err)
 }
 
-func testDownload(t *testing.T, client CloudStorage, testCfg testConfig) {
-	name := "test"
-	filePath, err := createJSONFile(testCfg.dir, name)
+func testUploadDownloadDelete(t *testing.T, client CloudStorage, testCfg testConfig) {
+	name := "testUpDoDe"
+	dataDir := fmt.Sprintf("%s/%s", testCfg.dir, "delivery")
+	filePath, err := createJSONFile(dataDir, name)
 	require.NoError(t, err)
 
 	file, err := os.Open(filePath)
@@ -117,20 +118,25 @@ func testDownload(t *testing.T, client CloudStorage, testCfg testConfig) {
 		require.NoError(t, err)
 	}()
 
-	destName := fmt.Sprintf("%s.json", name)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cfr, err := NewCloudFileRequest(testCfg.bucket, destName, testCfg.dir, 0)
+	cfr, err := NewCloudFileRequest(testCfg.bucket, filepath.Base(filePath), dataDir, 0)
 	require.NoError(t, err)
 
-	n, err := client.UploadFile(ctx, file, cfr)
+	nUp, err := client.UploadFile(ctx, file, cfr)
 	require.NoError(t, err)
-	t.Logf(" testUpload: %d bytes written", n)
-	require.Equal(t, true, n > 0)
+	t.Logf(" testUploadDownloadDelete: %d bytes written", nUp)
+	require.Equal(t, true, nUp > 0)
 
-	localFilePath := filepath.Join(testCfg.dir, fmt.Sprintf("%s-copy.json", name))
+	localFilePath := filepath.Join(dataDir, fmt.Sprintf("%s-copy.json", name))
+	_, err = os.Stat(filepath.Dir(localFilePath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			err := os.MkdirAll(filepath.Dir(localFilePath), os.ModePerm)
+			require.NoError(t, err)
+		}
+	}
 	lFile, err := os.Create(localFilePath)
 	require.NoError(t, err)
 	defer func() {
@@ -138,10 +144,14 @@ func testDownload(t *testing.T, client CloudStorage, testCfg testConfig) {
 		require.NoError(t, err)
 	}()
 
-	n, err = client.DownloadFile(ctx, lFile, cfr)
+	nDow, err := client.DownloadFile(ctx, lFile, cfr)
 	require.NoError(t, err)
-	t.Logf(" testDownload: %d bytes written to file %s", n, localFilePath)
-	require.Equal(t, true, n > 0)
+	t.Logf(" testUploadDownloadDelete: %d bytes written to file %s", nDow, localFilePath)
+	require.Equal(t, true, nDow > 0)
+	require.Equal(t, nUp, nDow)
+
+	err = client.DeleteObject(ctx, cfr)
+	require.NoError(t, err)
 }
 
 func testListObjects(t *testing.T, client CloudStorage, testCfg testConfig) {
@@ -156,12 +166,10 @@ func testListObjects(t *testing.T, client CloudStorage, testCfg testConfig) {
 		require.NoError(t, err)
 	}()
 
-	destName := fmt.Sprintf("%s.json", name)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cfr, err := NewCloudFileRequest(testCfg.bucket, destName, testCfg.dir, 0)
+	cfr, err := NewCloudFileRequest(testCfg.bucket, filepath.Base(filePath), testCfg.dir, 0)
 	require.NoError(t, err)
 
 	n, err := client.UploadFile(ctx, file, cfr)
@@ -172,16 +180,8 @@ func testListObjects(t *testing.T, client CloudStorage, testCfg testConfig) {
 	names, err := client.ListObjects(ctx, cfr)
 	require.NoError(t, err)
 	require.Equal(t, true, len(names) > 0)
-}
 
-func testDeleteObjects(t *testing.T, client CloudStorage, testCfg testConfig) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	cfr, err := NewCloudFileRequest(testCfg.bucket, "", "", 0)
-	require.NoError(t, err)
-
-	err = client.DeleteObjects(ctx, cfr)
+	err = client.DeleteObject(ctx, cfr)
 	require.NoError(t, err)
 }
 
@@ -205,6 +205,16 @@ func createJSONFile(dir, name string) (string, error) {
 		fPath = fmt.Sprintf("%s/%s", dir, fPath)
 	}
 	items := createStoreJSONList()
+
+	_, err := os.Stat(filepath.Dir(fPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			err := os.MkdirAll(filepath.Dir(fPath), os.ModePerm)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
 
 	f, err := os.Create(fPath)
 	if err != nil {
