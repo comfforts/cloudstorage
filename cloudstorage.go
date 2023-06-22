@@ -85,14 +85,14 @@ func (cs *cloudStorageClient) UploadFile(ct context.Context, file io.Reader, cfr
 	wc := obj.NewWriter(ctx)
 	defer func() {
 		if err := wc.Close(); err != nil {
-			cs.logger.Error(ERROR_CLOSING_FILE, zap.Error(err), zap.String("filepath", fPath))
+			cs.logger.Error("error closing cloud file", zap.Error(err), zap.String("filepath", fPath))
 		}
 	}()
 
 	nBytes, err := io.Copy(wc, file)
 	if err != nil {
-		cs.logger.Error(ERROR_UPLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
-		return 0, errors.WrapError(err, ERROR_UPLOADING_FILE, fPath)
+		cs.logger.Error("error uploading file", zap.Error(err), zap.String("filepath", fPath))
+		return 0, errors.WrapError(err, "error uploading file %s", fPath)
 	}
 	cs.logger.Debug("cloud file created/updated", zap.String("filepath", fPath))
 	return nBytes, nil
@@ -114,26 +114,26 @@ func (cs *cloudStorageClient) DownloadFile(ct context.Context, file io.Writer, c
 	obj := cs.client.Bucket(cfr.bucket).Object(fPath)
 	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		cs.logger.Error(ERROR_FILE_INACCESSIBLE, zap.Error(err), zap.String("filepath", fPath))
-		return 0, errors.WrapError(err, ERROR_FILE_INACCESSIBLE, fPath)
+		cs.logger.Error("cloud file inaccessible", zap.Error(err), zap.String("filepath", fPath))
+		return 0, errors.WrapError(err, "cloud file inaccessible %s", fPath)
 	}
 	cs.logger.Debug("cloud file downloaded", zap.String("filepath", fPath), zap.Int64("created", attrs.Created.Unix()), zap.Int64("updated", attrs.Updated.Unix()))
 
 	rc, err := obj.NewReader(ctx)
 	if err != nil {
-		cs.logger.Error(ERROR_DOWNLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
-		return 0, errors.WrapError(err, ERROR_DOWNLOADING_FILE, fPath)
+		cs.logger.Error("error reading cloud file", zap.Error(err), zap.String("filepath", fPath))
+		return 0, errors.WrapError(err, "error reading cloud file %s", fPath)
 	}
 	defer func() {
 		if err := rc.Close(); err != nil {
-			cs.logger.Error(ERROR_CLOSING_FILE, zap.Error(err), zap.String("filepath", fPath))
+			cs.logger.Error("error closing cloud file", zap.Error(err), zap.String("filepath", fPath))
 		}
 	}()
 
 	nBytes, err := io.Copy(file, rc)
 	if err != nil {
-		cs.logger.Error(ERROR_DOWNLOADING_FILE, zap.Error(err), zap.String("filepath", fPath))
-		return 0, errors.WrapError(err, ERROR_DOWNLOADING_FILE, fPath)
+		cs.logger.Error("error copying cloud file", zap.Error(err), zap.String("filepath", fPath))
+		return 0, errors.WrapError(err, "error copying cloud file %s", fPath)
 	}
 
 	return nBytes, nil
