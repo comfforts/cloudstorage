@@ -1,4 +1,4 @@
-package cloudstorage
+package cloudstorage_test
 
 import (
 	"bytes"
@@ -9,12 +9,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
-	"github.com/comfforts/errors"
 	"github.com/comfforts/logger"
 	"github.com/stretchr/testify/require"
+
+	cs "github.com/comfforts/cloudstorage"
 )
+
+const DEFAULT_DATA_PATH = "scheduler"
 
 type testConfig struct {
 	dir       string
@@ -22,117 +26,94 @@ type testConfig struct {
 	credsPath string
 }
 
-func getTestConfig() testConfig {
-	dataDir := os.Getenv("DATA_DIR")
-	credsPath := os.Getenv("CREDS_PATH")
-	bktName := os.Getenv("BUCKET_NAME")
-
-	return testConfig{
-		dir:       dataDir,
-		bucket:    bktName,
-		credsPath: credsPath,
-	}
-}
-
 type JSONMapper = map[string]interface{}
 
-func TestCloudFileStorage(t *testing.T) {
-	for scenario, fn := range map[string]func(
-		t *testing.T,
-		client CloudStorage,
-		testCfg testConfig,
-	){
-		"list objects succeeds":                   testListObjects,
-		"file upload & delete succeeds":           testUploadDelete,
-		"file upload, download & delete succeeds": testUploadDownloadDelete,
-		"file download, succeeds":                 testDownloadFile,
-	} {
-		testCfg := getTestConfig()
-		t.Run(scenario, func(t *testing.T) {
-			client, teardown := setupCloudTest(t, testCfg)
-			defer teardown()
-			fn(t, client, testCfg)
-		})
+func TestListObjects(t *testing.T) {
+	testCfg := buildTestConfig()
+	client, ctx, teardown := setupCloudTest(t, testCfg)
+	defer teardown()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	names, err := client.ListObjects(ctx, testCfg.bucket)
+	require.NoError(t, err)
+	require.Equal(t, true, len(names) > 0)
+
+	if l, err := logger.LoggerFromContext(ctx); err == nil {
+		l.Debug("bucket items", "items", names)
 	}
 }
 
-func setupCloudTest(t *testing.T, testCfg testConfig) (
-	client CloudStorage,
-	teardown func(),
-) {
-	t.Helper()
+func TestDownloadObject(t *testing.T) {
+	testCfg := buildTestConfig()
+	client, ctx, teardown := setupCloudTest(t, testCfg)
+	defer teardown()
 
-	err := createDirectory(fmt.Sprintf("%s/", testCfg.dir))
+	l, err := logger.LoggerFromContext(ctx)
 	require.NoError(t, err)
 
-	logger := logger.NewTestAppLogger(testCfg.dir)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	cscCfg := CloudStorageClientConfig{
-		CredsPath: testCfg.credsPath,
+	names, err := client.ListObjects(ctx, testCfg.bucket)
+	require.NoError(t, err)
+	require.Equal(t, true, len(names) > 0)
+	l.Debug("bucket items", "num-items", len(names))
+	l.Debug("bucket items", "items", names)
+
+	fileName := "Agents-sm.csv"
+	filePath := "scheduler"
+
+	localFilePath := filepath.Join(testCfg.dir, filePath, fileName)
+	_, err = os.Stat(filepath.Dir(localFilePath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			err := os.MkdirAll(filepath.Dir(localFilePath), os.ModePerm)
+			require.NoError(t, err)
+		}
 	}
-	csc, err := NewCloudStorageClient(cscCfg, logger)
-	require.NoError(t, err)
-
-	return csc, func() {
-		err := csc.Close()
-		require.NoError(t, err)
-
-		// t.Logf(" test ended, will remove %s folder", testCfg.dir)
-		// err = os.RemoveAll(testCfg.dir)
-		// require.NoError(t, err)
-	}
-}
-
-func testUploadDelete(t *testing.T, client CloudStorage, testCfg testConfig) {
-	name := "testUpDe"
-	filePath, err := createJSONFile(testCfg.dir, name)
-	require.NoError(t, err)
-
-	file, err := os.Open(filePath)
+	lFile, err := os.Create(localFilePath)
 	require.NoError(t, err)
 	defer func() {
-		err := file.Close()
+		err := lFile.Close()
 		require.NoError(t, err)
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	cfr, err := NewCloudFileRequest(testCfg.bucket, filepath.Base(filePath), testCfg.dir, 0)
+	n, err := client.DownloadFile(ctx, lFile, testCfg.bucket, filePath, fileName)
 	require.NoError(t, err)
-
-	n, err := client.UploadFile(ctx, file, cfr)
-	require.NoError(t, err)
-	t.Logf(" testUploadDelete: %d bytes written", n)
 	require.Equal(t, true, n > 0)
-
-	err = client.DeleteObject(ctx, cfr)
-	require.NoError(t, err)
+	l.Debug("downloaded cloud file", "local-file-path", localFilePath, "bytes", n)
 }
 
-func testUploadDownloadDelete(t *testing.T, client CloudStorage, testCfg testConfig) {
-	name := "testUpDoDe"
-	dataDir := fmt.Sprintf("%s/%s", testCfg.dir, "delivery")
-	filePath, err := createJSONFile(dataDir, name)
+func TestUploadDownloadDelete(t *testing.T) {
+	testCfg := buildTestConfig()
+	client, ctx, teardown := setupCloudTest(t, testCfg)
+	defer teardown()
+
+	l, err := logger.LoggerFromContext(ctx)
 	require.NoError(t, err)
 
-	file, err := os.Open(filePath)
-	require.NoError(t, err)
-	defer func() {
-		err := file.Close()
-		require.NoError(t, err)
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cfr, err := NewCloudFileRequest(testCfg.bucket, filepath.Base(filePath), dataDir, 0)
+	name := "testUploadDownloadDelete"
+	dataDir := fmt.Sprintf("%s/%s", testCfg.dir, "delivery")
+
+	// create json data
+	items := createStoreJSONList()
+	// Serialize json data
+	itemsJSON, err := json.MarshalIndent(items, "", "  ")
 	require.NoError(t, err)
 
-	nUp, err := client.UploadFile(ctx, file, cfr)
+	// build json buffer reader
+	file := bytes.NewReader(itemsJSON)
+	uploadedFilePath := fmt.Sprintf("%s/%s.json", testCfg.dir, name)
+
+	nUp, err := client.UploadFile(ctx, file, testCfg.bucket, testCfg.dir, filepath.Base(uploadedFilePath))
 	require.NoError(t, err)
-	t.Logf(" testUploadDownloadDelete: %d bytes written", nUp)
 	require.Equal(t, true, nUp > 0)
+	l.Debug("uploaded cloud file", "file", uploadedFilePath, "bytes", nUp)
 
 	localFilePath := filepath.Join(dataDir, fmt.Sprintf("%s-copy.json", name))
 	_, err = os.Stat(filepath.Dir(localFilePath))
@@ -149,45 +130,169 @@ func testUploadDownloadDelete(t *testing.T, client CloudStorage, testCfg testCon
 		require.NoError(t, err)
 	}()
 
-	nDow, err := client.DownloadFile(ctx, lFile, cfr)
+	nDow, err := client.DownloadFile(ctx, lFile, testCfg.bucket, testCfg.dir, filepath.Base(uploadedFilePath))
 	require.NoError(t, err)
-	t.Logf(" testUploadDownloadDelete: %d bytes written to file %s", nDow, localFilePath)
 	require.Equal(t, true, nDow > 0)
 	require.Equal(t, nUp, nDow)
+	l.Debug("downloaded cloud file", "local-file-path", localFilePath, "bytes", nDow)
 
-	err = client.DeleteObject(ctx, cfr)
+	err = client.DeleteObject(ctx, testCfg.bucket, uploadedFilePath)
 	require.NoError(t, err)
+	l.Debug("deleted cloud file", "file", uploadedFilePath)
 }
 
-func testListObjects(t *testing.T, client CloudStorage, testCfg testConfig) {
-	name := "test"
-	filePath, err := createJSONFile(testCfg.dir, name)
+func TestCloudFileStorage(t *testing.T) {
+	for scenario, fn := range map[string]func(
+		t *testing.T,
+		ctx context.Context,
+		client cs.CloudStorage,
+		testCfg testConfig,
+	){
+		"upload list delete objects succeeds": testUploadListDeleteObjects,
+	} {
+		testCfg := buildTestConfig()
+		t.Run(scenario, func(t *testing.T) {
+			client, ctx, teardown := setupCloudTest(t, testCfg)
+			defer teardown()
+			fn(t, ctx, client, testCfg)
+		})
+	}
+}
+
+func testUploadListDeleteObjects(t *testing.T, ctx context.Context, client cs.CloudStorage, testCfg testConfig) {
+	l, err := logger.LoggerFromContext(ctx)
 	require.NoError(t, err)
 
-	file, err := os.Open(filePath)
+	name := "test"
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// create json data
+	items := createStoreJSONList()
+	// Serialize json data
+	itemsJSON, err := json.MarshalIndent(items, "", "  ")
 	require.NoError(t, err)
-	defer func() {
-		err := file.Close()
-		require.NoError(t, err)
-	}()
+
+	// build json buffer reader
+	file := bytes.NewReader(itemsJSON)
+	uploadedFilePath := fmt.Sprintf("%s/%s.json", testCfg.dir, name)
+
+	n, err := client.UploadFile(ctx, file, testCfg.bucket, testCfg.dir, filepath.Base(uploadedFilePath))
+	require.NoError(t, err)
+	l.Debug("uploaded cloud file", "file", uploadedFilePath, "bytes", n)
+	require.Equal(t, true, n > 0)
+
+	names, err := client.ListObjects(ctx, testCfg.bucket)
+	require.NoError(t, err)
+	require.Equal(t, true, len(names) > 0)
+	require.True(t, slices.Contains(names, uploadedFilePath))
+	l.Debug("bucket items", "items", names)
+
+	err = client.DeleteObject(ctx, testCfg.bucket, uploadedFilePath)
+	require.NoError(t, err)
+	l.Debug("deleted cloud file", "file", uploadedFilePath)
+}
+
+func TestReadFileChunksGCP(t *testing.T) {
+	fileName := "Agents-sm.csv"
+	filePath := "scheduler"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cfr, err := NewCloudFileRequest(testCfg.bucket, filepath.Base(filePath), testCfg.dir, 0)
+	l := logger.GetSlogLogger()
+	ctx = logger.WithLogger(ctx, l)
+
+	chnkStream, err := readFileChunksGCP(t, ctx, fileName, filePath)
 	require.NoError(t, err)
 
-	n, err := client.UploadFile(ctx, file, cfr)
-	require.NoError(t, err)
-	t.Logf(" testUpload: %d bytes written", n)
-	require.Equal(t, true, n > 0)
+	processCSVStream(ctx, chnkStream)
+	if err != nil {
+		fmt.Printf("error processing streaming: %v\n", err)
+	}
+}
 
-	names, err := client.ListObjects(ctx, cfr)
-	require.NoError(t, err)
-	require.Equal(t, true, len(names) > 0)
+func TestReadFileChunkRecordsGCP(t *testing.T) {
+	fileName := "Agents-sm.csv"
+	filePath := "scheduler"
 
-	err = client.DeleteObject(ctx, cfr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	l := logger.GetSlogLogger()
+	ctx = logger.WithLogger(ctx, l)
+
+	chnkStream, err := readFileChunksGCP(t, ctx, fileName, filePath)
 	require.NoError(t, err)
+
+	processCSVStreamRecord(ctx, chnkStream)
+	if err != nil {
+		fmt.Printf("error processing streaming: %v\n", err)
+	}
+}
+
+func TestReadFileChunks(t *testing.T) {
+	fileName := "Agents-sm.csv"
+	filePath := "scheduler"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	chnkStream, err := readFileChunks(fileName, filePath)
+	require.NoError(t, err)
+
+	processCSVStream(ctx, chnkStream)
+	if err != nil {
+		fmt.Printf("error processing streaming: %v\n", err)
+	}
+}
+
+func TestReadFileChunkRecords(t *testing.T) {
+	fileName := "Agents-sm.csv"
+	filePath := "scheduler"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	chnkStream, err := readFileChunks(fileName, filePath)
+	require.NoError(t, err)
+
+	processCSVStreamRecord(ctx, chnkStream)
+	if err != nil {
+		fmt.Printf("error processing streaming: %v\n", err)
+	}
+}
+
+func setupCloudTest(t *testing.T, cfg testConfig) (client cs.CloudStorage, ctx context.Context, teardown func()) {
+	t.Helper()
+
+	require.NoError(t, createDirectory(fmt.Sprintf("%s/", cfg.dir)))
+
+	l := logger.GetSlogMultiLogger(cfg.dir)
+	ctx = logger.WithLogger(context.Background(), l)
+
+	cscCfg := cs.CloudStorageClientConfig{
+		CredsPath: cfg.credsPath,
+	}
+	csc, err := cs.NewCloudStorageClient(ctx, cscCfg)
+	require.NoError(t, err)
+
+	return csc, ctx, func() {
+		err := csc.Close(ctx)
+		require.NoError(t, err)
+	}
+}
+
+func buildTestConfig() testConfig {
+	dataDir := os.Getenv("DATA_DIR")
+	credsPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	bktName := os.Getenv("BUCKET")
+
+	return testConfig{
+		dir:       dataDir,
+		bucket:    bktName,
+		credsPath: credsPath,
+	}
 }
 
 func createDirectory(path string) error {
@@ -202,67 +307,6 @@ func createDirectory(path string) error {
 		return err
 	}
 	return nil
-}
-
-func testDownloadFile(t *testing.T, client CloudStorage, testCfg testConfig) {
-	fileName := "Agents-sm.csv"
-	filePath := "scheduler"
-
-	localFilePath := filepath.Join(testCfg.dir, filePath, fileName)
-	_, err := os.Stat(filepath.Dir(localFilePath))
-	if err != nil {
-		if os.IsNotExist(err) {
-			err := os.MkdirAll(filepath.Dir(localFilePath), os.ModePerm)
-			require.NoError(t, err)
-		}
-	}
-	lFile, err := os.Create(localFilePath)
-	require.NoError(t, err)
-	defer func() {
-		err := lFile.Close()
-		require.NoError(t, err)
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	cfr, err := NewCloudFileRequest(testCfg.bucket, fileName, filePath, 0)
-	require.NoError(t, err)
-
-	n, err := client.DownloadFile(ctx, lFile, cfr)
-	require.NoError(t, err)
-	require.Equal(t, true, n > 0)
-}
-
-func createJSONFile(dir, name string) (string, error) {
-	fPath := fmt.Sprintf("%s.json", name)
-	if dir != "" {
-		fPath = fmt.Sprintf("%s/%s", dir, fPath)
-	}
-	items := createStoreJSONList()
-
-	_, err := os.Stat(filepath.Dir(fPath))
-	if err != nil {
-		if os.IsNotExist(err) {
-			err := os.MkdirAll(filepath.Dir(fPath), os.ModePerm)
-			if err != nil {
-				return "", err
-			}
-		}
-	}
-
-	f, err := os.Create(fPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	encoder := json.NewEncoder(f)
-	err = encoder.Encode(items)
-	if err != nil {
-		return "", err
-	}
-	return fPath, nil
 }
 
 func createStoreJSONList() []JSONMapper {
@@ -298,42 +342,10 @@ func createStoreJSONList() []JSONMapper {
 	return items
 }
 
-func TestReadFileChunksGCP(t *testing.T) {
-	fileName := "Agents-sm.csv"
-	filePath := "scheduler"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	chnkStream, err := readFileChunksGCP(t, ctx, fileName, filePath)
-	require.NoError(t, err)
-
-	processCSVStream(ctx, chnkStream)
-	if err != nil {
-		fmt.Printf("error processing streaming: %v\n", err)
-	}
-}
-
-func TestReadFileChunkRecordsGCP(t *testing.T) {
-	fileName := "Agents-sm.csv"
-	filePath := "scheduler"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	chnkStream, err := readFileChunksGCP(t, ctx, fileName, filePath)
-	require.NoError(t, err)
-
-	processCSVStreamRecord(ctx, chnkStream)
-	if err != nil {
-		fmt.Printf("error processing streaming: %v\n", err)
-	}
-}
-
 func readFileChunksGCP(t *testing.T, ctx context.Context, fileName, filePath string) (<-chan []byte, error) {
 	const BUFFER_SIZE = 400
-	testCfg := getTestConfig()
-	client, teardown := setupCloudTest(t, testCfg)
+	testCfg := buildTestConfig()
+	client, _, teardown := setupCloudTest(t, testCfg)
 	defer teardown()
 
 	// Create a channel to stream the chunks
@@ -345,7 +357,7 @@ func readFileChunksGCP(t *testing.T, ctx context.Context, fileName, filePath str
 			close(chnkStream)
 		}()
 
-		cfr, err := NewCloudFileRequest(testCfg.bucket, fileName, filePath, 0)
+		cfr, err := cs.NewCloudFileRequest(testCfg.bucket, fileName, filePath, 0)
 		require.NoError(t, err)
 
 		buf := make([]byte, BUFFER_SIZE)
@@ -382,38 +394,6 @@ func readFileChunksGCP(t *testing.T, ctx context.Context, fileName, filePath str
 	return chnkStream, nil
 }
 
-func TestReadFileChunks(t *testing.T) {
-	fileName := "Agents-sm.csv"
-	filePath := "scheduler"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	chnkStream, err := readFileChunks(fileName, filePath)
-	require.NoError(t, err)
-
-	processCSVStream(ctx, chnkStream)
-	if err != nil {
-		fmt.Printf("error processing streaming: %v\n", err)
-	}
-}
-
-func TestReadFileChunkRecords(t *testing.T) {
-	fileName := "Agents-sm.csv"
-	filePath := "scheduler"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	chnkStream, err := readFileChunks(fileName, filePath)
-	require.NoError(t, err)
-
-	processCSVStreamRecord(ctx, chnkStream)
-	if err != nil {
-		fmt.Printf("error processing streaming: %v\n", err)
-	}
-}
-
 func readFileChunks(fileName, filePath string) (<-chan []byte, error) {
 	const LOCAL_DATA_DIR = "data"
 	const BUFFER_SIZE = 400
@@ -421,7 +401,7 @@ func readFileChunks(fileName, filePath string) (<-chan []byte, error) {
 	localFilePath := filepath.Join(LOCAL_DATA_DIR, filePath, fileName)
 	_, err := os.Stat(filepath.Dir(localFilePath))
 	if err != nil {
-		return nil, errors.WrapError(err, "error accessing file %s", localFilePath)
+		return nil, fmt.Errorf("error accessing file %s: %w", localFilePath, err)
 	}
 
 	// Create a channel to stream the chunks
